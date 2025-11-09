@@ -33,7 +33,7 @@
 #include "virtio_console.h"
 #include "virtio_gpu.h"
 #include "virtio_net.h"
-// #include "virtio_rng.h"
+#include "virtio_rng.h"
 
 /// hvisor kernel module fd
 int ko_fd;
@@ -211,12 +211,12 @@ VirtIODevice *create_virtio_device(VirtioDeviceType dev_type, uint32_t zone_id,
     // 最后进行virtio_console的init
         is_err = virtio_console_init(vdev);
         break;
-    // case VirtioTRng:
-    //     vdev->regs.dev_feature = 0; // undefined
-    //     vdev->dev = generate_empty_rngdev();
-    //     // init_virtio_queue(vdev, dev_type);
-    //     // is_err = virtio_rng_init(vdev);
-    // break;
+    case VirtioTRng:
+        vdev->regs.dev_feature = 0; // undefined
+        vdev->dev = generate_empty_rngdev();
+        init_virtio_queue(vdev, dev_type);
+        is_err = virtio_rng_init(vdev);
+    break;
     case VirtioTGPU:
 #ifdef ENABLE_VIRTIO_GPU
         vdev->regs.dev_feature = GPU_SUPPORTED_FEATURES;
@@ -312,15 +312,15 @@ void init_virtio_queue(VirtIODevice *vdev, VirtioDeviceType type) {
             virtio_console_txq_notify_handler;
         vdev->vqs = vqs;
         break;
-    // case VirtioTRng:
-    //     vdev->vqs_len = 1;
-    //     vqs = malloc(sizeof(VirtQueue) * 1);
-    //     virtqueue_reset(vqs,0);
-    //     vqs[0].queue_num_max = 16;
-    //     vqs[0].dev = vdev;
-    //     vqs[0].notify_handler = virtio_rng_txq_notify_handler;
-    //     vdev->vqs = vqs;
-    //     break;
+    case VirtioTRng:
+        vdev->vqs_len = 1;
+        vqs = malloc(sizeof(VirtQueue) * 1);
+        virtqueue_reset(vqs,0);
+        vqs[0].queue_num_max = 16;
+        vqs[0].dev = vdev;
+        vqs[0].notify_handler = virtio_rng_txq_notify_handler;
+        vdev->vqs = vqs;
+        break;
     case VirtioTGPU:
 #ifdef ENABLE_VIRTIO_GPU
         vdev->vqs_len = GPU_MAX_QUEUES;
