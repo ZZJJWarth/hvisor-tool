@@ -48,6 +48,7 @@ typedef enum {
     VirtioTNet,
     VirtioTBlock,
     VirtioTConsole,
+    VirtioTRng,
     VirtioTGPU = 16
 } VirtioDeviceType;
 
