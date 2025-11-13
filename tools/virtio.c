@@ -64,6 +64,8 @@ const char *virtio_device_type_to_string(VirtioDeviceType type) {
         return "virtio-blk";
     case VirtioTConsole:
         return "virtio-console";
+    case VirtioTRng:
+        return "virtio-rng";
     case VirtioTGPU:
         return "virtio-gpu";
     default:
@@ -157,7 +159,7 @@ VirtIODevice *create_virtio_device(VirtioDeviceType dev_type, uint32_t zone_id,
                                    uint32_t irq_id, void *arg0, void *arg1) {
     // 首先我们打印一个信息
                                     log_info(
-        "114514 create virtio device type %s, zone id %d, base addr %lx, len %lx, "
+        "create virtio device type %s, zone id %d, base addr %lx, len %lx, "
         "irq id %d",
         virtio_device_type_to_string(dev_type), zone_id, base_addr, len,
         irq_id);
@@ -1172,7 +1174,10 @@ int create_virtio_device_from_json(cJSON *device_json, int zone_id) {
         dev_type = VirtioTConsole;
     } else if (strcmp(type, "gpu") == 0) {
         dev_type = VirtioTGPU;
-    } else {
+    } else if (strcmp(type, "rng") == 0){
+        dev_type = VirtioTRng;
+    }
+    else {
         log_error("unknown device type %s", type);
         return -1;
     }
