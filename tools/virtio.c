@@ -214,7 +214,7 @@ VirtIODevice *create_virtio_device(VirtioDeviceType dev_type, uint32_t zone_id,
         is_err = virtio_console_init(vdev);
         break;
     case VirtioTRng:
-        vdev->regs.dev_feature = 0; // undefined
+        vdev->regs.dev_feature = (1ULL << 32); // undefined
         vdev->dev = generate_empty_rngdev();
         init_virtio_queue(vdev, dev_type);
         is_err = virtio_rng_init(vdev);
@@ -483,17 +483,21 @@ int process_descriptor_chain(VirtQueue *vq, uint16_t *desc_idx,
     last_avail_idx = vq->last_avail_idx;
 
     // No new requests
+    // last_avail_idx表示的是上次kick时，idx的位置。如果此时的idx还是上次的idx,那么我们就啥都不干
     if (last_avail_idx == vq->avail_ring->idx)
         return 0;
 
     // Update to the index to be processed during this kick
+    // 如果确实不是，那么我们就更新
     vq->last_avail_idx++;
 
     // Get the index of the first available descriptor
+    // 需要注意，ring本身就是一个u16数组，所以desc_idx其实就是新来的idx（其实这里这个last_avail_idx有点多余了）
     *desc_idx = next = vq->avail_ring->ring[last_avail_idx & (vq->num - 1)];
     // Record the length of the descriptor chain to chain_len
     for (i = 0; i < (int)vq->num; i++, next = vdesc->next) {
         // Get a descriptor
+        // vdesc就直接获取了对应的描述符
         vdesc = &vq->desc_table[next];
         // TODO: vdesc->len may not be chain_len, virtio specification doesn't
         // say it.
@@ -1105,6 +1109,7 @@ int virtio_init() {
     // The higher log level is, the faster virtio-blk will be.
     int err;
     // 这里做了一些初始化
+    // 将所有信号封锁
     // Define signal set and add all signals to the set
     sigset_t block_mask;
     sigfillset(&block_mask);
@@ -1209,7 +1214,11 @@ int create_virtio_device_from_json(cJSON *device_json, int zone_id) {
     } else if (dev_type == VirtioTConsole) {
         // virtio-console
         arg0 = arg1 = NULL;
-    } else if (dev_type == VirtioTGPU) {
+    } else if (dev_type == VirtioTRng){
+        arg0 = arg1 = NULL; 
+    }
+    
+    else if (dev_type == VirtioTGPU) {
 // virtio-gpu
 #ifdef ENABLE_VIRTIO_GPU
         // TODO: Add display device settings
