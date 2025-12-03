@@ -42,8 +42,7 @@ typedef struct memory_region memory_region_t;
 
 struct hv_pci_dev_config {
     __u64 bdf;
-    __u64 vbdf;
-    __u64 dev_type;
+    __u32 dev_type;
 };
 
 typedef struct hv_pci_dev_config hv_pci_dev_config_t;
