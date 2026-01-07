@@ -25,8 +25,8 @@ endif
 
 ifeq ($(ARCH), loongarch)
 toolchain := $(CCARCH)-unknown-linux-$(LIBC)
-else ifeq ($(ARCH), arm64)
-toolchain := $(CCARCH)-none-linux-$(LIBC)
+# else ifeq ($(ARCH), arm64)
+# toolchain := $(CCARCH)-none-linux-$(LIBC)
 else
 toolchain := $(CCARCH)-linux-$(LIBC)
 endif

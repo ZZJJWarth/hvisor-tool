@@ -514,6 +514,28 @@ static int parse_pci_config(cJSON *root, zone_config_t *config) {
         log_error("Exceeded maximum allowed pci configs.");
         goto err_out;
     }
+    cJSON *ecam_base_json =
+        SAFE_CJSON_GET_OBJECT_ITEM(pci_config_json, "ecam_base");
+    cJSON *io_base_json =
+        SAFE_CJSON_GET_OBJECT_ITEM(pci_config_json, "io_base");
+    cJSON *pci_io_base_json =
+        SAFE_CJSON_GET_OBJECT_ITEM(pci_config_json, "pci_io_base");
+    cJSON *mem32_base_json =
+        SAFE_CJSON_GET_OBJECT_ITEM(pci_config_json, "mem32_base");
+    cJSON *pci_mem32_base_json =
+        SAFE_CJSON_GET_OBJECT_ITEM(pci_config_json, "pci_mem32_base");
+    cJSON *mem64_base_json =
+        SAFE_CJSON_GET_OBJECT_ITEM(pci_config_json, "mem64_base");
+    cJSON *pci_mem64_base_json =
+        SAFE_CJSON_GET_OBJECT_ITEM(pci_config_json, "pci_mem64_base");
+    cJSON *ecam_size_json =
+        SAFE_CJSON_GET_OBJECT_ITEM(pci_config_json, "ecam_size");
+    cJSON *io_size_json =
+        SAFE_CJSON_GET_OBJECT_ITEM(pci_config_json, "io_size");
+    cJSON *mem32_size_json =
+        SAFE_CJSON_GET_OBJECT_ITEM(pci_config_json, "mem32_size");
+    cJSON *mem64_size_json =
+        SAFE_CJSON_GET_OBJECT_ITEM(pci_config_json, "mem64_size");
 
     config->num_pci_bus = num_pci_bus;
     log_info("num pci bus %llx", num_pci_bus);
