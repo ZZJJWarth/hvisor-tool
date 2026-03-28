@@ -4,7 +4,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 
-RngDev *generate_empty_rngdev(){
+RngDev* generate_empty_rngdev(){
     RngDev *rdev = (RngDev *)malloc(sizeof(RngDev));
     rdev->rcv_idx = 0;
     return rdev;
