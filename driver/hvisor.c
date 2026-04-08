@@ -330,19 +330,19 @@ static irqreturn_t virtio_irq_handler(int irq, void *dev_id) {
 }
 
 static irqreturn_t virtio_pci_irq_init_handler(int irq, void *dev_id){
-    struct virtio_pci_req test = virtio_pci_bridge->req_list[1];
+    struct virtqueue_info test = virtio_pci_bridge->req_list[1];
     pr_info("114514: I get pci req: desc:0x%x avail:0x%x used:0x%x\n",test.desc_area,test.avail_area,test.used_area);
     return IRQ_WAKE_THREAD;
 }
 
-struct virtio_pci_req temp;
+struct virtqueue_info temp;
 
 // Interrupt handler for Virtio device.
 static irqreturn_t virtio_pci_irq_handler(int irq, void *dev_id) {
     pr_info("pci irq thread!\n");
-    struct virtio_pci_req config = virtio_pci_bridge->req_list[0];
+    struct virtqueue_info config = virtio_pci_bridge->req_list[0];
     __u64 index = config.desc_area;
-    struct virtio_pci_req target = virtio_pci_bridge->req_list[index];
+    struct virtqueue_info target = virtio_pci_bridge->req_list[index];
     if (config.avail_area == 0){
         
         void *addr = memremap(target.desc_area,0x2000,MEMREMAP_WB);
@@ -399,7 +399,7 @@ static irqreturn_t virtio_pci_irq_handler(int irq, void *dev_id) {
     return IRQ_HANDLED;
 }
 
-static int create_virtio_pci_dev(__u16 num_of_vq,struct virtio_pci_req* vqs,__u16 features,void (*handler)(struct virtio_pci_req*,int q_id)){
+static int create_virtio_pci_dev(__u16 num_of_vq,struct virtqueue_info* vqs,__u16 features,void (*handler)(struct virtqueue_info*,int q_id)){
     
     if(nxt_dev_idx >= MAX_VIRTPCI_DEV){
         pr_err("nxt_dev_idx >= MAX_VIRTPCI_DEV there are too much device!\n");
@@ -433,7 +433,7 @@ static int create_virtio_pci_dev(__u16 num_of_vq,struct virtio_pci_req* vqs,__u1
     return nxt_dev_idx++;
 }
 
-static void virtio_rng_handler(struct virtio_pci_req *vq,int queue_id){
+static void virtio_rng_handler(struct virtqueue_info *vq,int queue_id){
     struct virtq_desc *desc = vq->desc_area;
     struct virtq_avail *avail = vq->avail_area;
     struct virtq_used *used = vq->used_area;
@@ -481,7 +481,7 @@ static irqreturn_t virtio_pci_irq_config_thread_handler(int irq,void *dev_id){
         pr_err("virtio_pci_bridge has not been initialized!");
         return IRQ_HANDLED;
     }
-    void (*handler)(struct virtio_pci_req*,int ) = NULL;
+    void (*handler)(struct virtqueue_info*,int ) = NULL;
     struct virtio_pci_config_info *info = &virtio_pci_bridge->config;
     switch(info->dtype){
         case VIRTIO_PCI_RNG:
@@ -522,7 +522,7 @@ static irqreturn_t virtio_pci_irq_data_thread_handler(int irq,void *dev_id){
         pr_err("the queue_id given by hvisor is invaild!\n");
         return IRQ_HANDLED;
     }
-    struct virtio_pci_req *vq = &dev->vqs[queue_id];
+    struct virtqueue_info *vq = &dev->vqs[queue_id];
 
     if(dev->data_req_handler != NULL){
         dev->data_req_handler(vq,queue_id);

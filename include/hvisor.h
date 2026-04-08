@@ -61,7 +61,7 @@ enum virtio_dev_type{
     VIRTIO_PCI_RNG=4,
 };
 
-struct virtio_pci_req{
+struct virtqueue_info{
     __u64 desc_area;
     __u64 avail_area;
     __u64 used_area;
@@ -72,7 +72,7 @@ struct virtio_pci_config_info{
     __u16 dev_id;
     __u16 num_of_queues;
     __u16 dtype;
-    struct virtio_pci_req vqs[MAX_VQ];
+    struct virtqueue_info vqs[MAX_VQ];
     
     
 };
@@ -87,7 +87,7 @@ struct virtio_pci_data_info{
 struct virtio_pci_bridge{
     struct virtio_pci_config_info config;
     struct virtio_pci_data_info data;
-    struct virtio_pci_req req_list[128];
+    // struct virtio_pci_req req_list[128];
 };
 
 struct virtq_desc{
@@ -116,9 +116,9 @@ struct virtq_used{
 
 struct virtio_pci_dev{
     __u16 num_of_vq;
-    struct virtio_pci_req vqs[MAX_VQ];
+    struct virtqueue_info vqs[MAX_VQ];
     __u16 features;
-    void (*data_req_handler)(struct virtio_pci_req*,int queue_id);
+    void (*data_req_handler)(struct virtqueue_info*,int queue_id);
 };
 
 struct ioctl_zone_list_args {
