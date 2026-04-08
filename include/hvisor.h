@@ -87,7 +87,7 @@ struct virtio_pci_data_info{
 struct virtio_pci_bridge{
     struct virtio_pci_config_info config;
     struct virtio_pci_data_info data;
-    // struct virtio_pci_req req_list[128];
+    struct virtqueue_info req_list[128];
 };
 
 struct virtq_desc{
