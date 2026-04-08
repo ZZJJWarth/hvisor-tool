@@ -13,12 +13,17 @@
 #include <getopt.h>
 #include <limits.h>
 #include <signal.h>
+#include <stdatomic.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/epoll.h>
+#include <sys/eventfd.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/prctl.h>
+#include <sys/signalfd.h>
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/uio.h>
@@ -26,6 +31,7 @@
 #include <unistd.h>
 
 #include "hvisor.h"
+#include "json_parse.h"
 #include "log.h"
 #include "safe_cjson.h"
 #include "virtio.h"
@@ -37,6 +43,9 @@
 
 /// hvisor kernel module fd
 int ko_fd;
+static int efd = -1;
+static int sfd = -1;
+static int epoll_fd = -1;
 volatile struct virtio_bridge *virtio_bridge;
 
 pthread_mutex_t RES_MUTEX = PTHREAD_MUTEX_INITIALIZER;
@@ -51,8 +60,6 @@ int vdevs_num;
 
 #define MAX_RAMS 4
 unsigned long long zone_mem[MAX_ZONES][MAX_RAMS][4];
-
-#define WAIT_TIME 1000 // 1ms
 
 const char *virtio_device_type_to_string(VirtioDeviceType type) {
     switch (type) {
@@ -108,10 +115,6 @@ inline int is_queue_full(unsigned int front, unsigned int rear,
     } else {
         return 0;
     }
-}
-
-inline int is_queue_empty(unsigned int front, unsigned int rear) {
-    return rear == front;
 }
 
 /// Write barrier to make sure all write operations are finished before this
@@ -660,9 +663,8 @@ static const char *virtio_mmio_reg_name(uint64_t offset) {
 }
 
 uint64_t virtio_mmio_read(VirtIODevice *vdev, uint64_t offset, unsigned size) {
-    log_debug("virtio mmio read at %#x", offset);
-    log_info("READ virtio mmio at offset=%#x[%s], size=%d, vdev=%p, type=%d",
-             offset, virtio_mmio_reg_name(offset), size, vdev, vdev->type);
+    log_debug("READ virtio mmio at offset=%#x[%s], size=%d, vdev=%p, type=%d",
+              offset, virtio_mmio_reg_name(offset), size, vdev, vdev->type);
 
     if (!vdev) {
         switch (offset) {
@@ -720,8 +722,8 @@ uint64_t virtio_mmio_read(VirtIODevice *vdev, uint64_t offset, unsigned size) {
         log_debug("read VIRTIO_MMIO_QUEUE_READY");
         return vdev->vqs[vdev->regs.queue_sel].ready;
     case VIRTIO_MMIO_INTERRUPT_STATUS:
-        log_info("debug: (%s) current interrupt status is %d", __func__,
-                 vdev->regs.interrupt_status);
+        log_debug("(%s) current interrupt status is %d", __func__,
+                  vdev->regs.interrupt_status);
 #ifdef LOONGARCH64
         // clear lvz gintc irq injection bit to avoid endless interrupt...
         log_warn(
@@ -763,12 +765,10 @@ uint64_t virtio_mmio_read(VirtIODevice *vdev, uint64_t offset, unsigned size) {
 
 void virtio_mmio_write(VirtIODevice *vdev, uint64_t offset, uint64_t value,
                        unsigned size) {
-    log_debug("virtio mmio write at %#x, value is %#x", offset, value);
-
-    log_info("WRITE virtio mmio at offset=%#x[%s], value=%#x, size=%d, "
-             "vdev=%p, type=%d",
-             offset, virtio_mmio_reg_name(offset), value, size, vdev,
-             vdev->type);
+    log_debug("WRITE virtio mmio at offset=%#x[%s], value=%#x, size=%d, "
+              "vdev=%p, type=%d",
+              offset, virtio_mmio_reg_name(offset), value, size, vdev,
+              vdev->type);
 
     VirtMmioRegs *regs = &vdev->regs;
     VirtQueue *vqs = vdev->vqs;
@@ -870,8 +870,8 @@ void virtio_mmio_write(VirtIODevice *vdev, uint64_t offset, uint64_t value,
                       regs->interrupt_status, value, vdev->type);
         }
         regs->interrupt_status &= !value;
-        log_info("debug: (%s) clearing! interrupt_status -> %d", __func__,
-                 regs->interrupt_status);
+        log_debug("(%s) clearing! interrupt_status -> %d", __func__,
+                  regs->interrupt_status);
         break;
     case VIRTIO_MMIO_STATUS:
         log_debug("write VIRTIO_MMIO_STATUS");
@@ -959,10 +959,19 @@ void virtio_inject_irq(VirtQueue *vq) {
         }
     }
     volatile struct device_res *res;
-    while (is_queue_full(virtio_bridge->res_front, virtio_bridge->res_rear,
-                         MAX_REQ))
-        ;
+
+    // virtio_bridge is a global resource located in shared memory.
+    // Access to critical resources such as res_front and res_rear requires
+    // locking.
+
+    // Since the shared resources related to res_list are only accessed
+    //  at one specific code location, a lock before polling is_queue_full
+    //  is enough to ensure thread safety and performance.
     pthread_mutex_lock(&RES_MUTEX);
+
+    while (is_queue_full(virtio_bridge->res_front, virtio_bridge->res_rear,
+                         MAX_REQ)) {
+    }
     unsigned int res_rear = virtio_bridge->res_rear;
     res = &virtio_bridge->res_list[res_rear];
     res->irq_id = vq->dev->irq_id;
@@ -1034,6 +1043,22 @@ void virtio_close() {
     for (int i = 0; i < vdevs_num; i++)
         vdevs[i]->virtio_close(vdevs[i]);
     close(ko_fd);
+
+    if (efd >= 0) {
+        close(efd);
+        efd = -1;
+    }
+
+    if (sfd >= 0) {
+        close(sfd);
+        sfd = -1;
+    }
+
+    if (epoll_fd >= 0) {
+        close(epoll_fd);
+        epoll_fd = -1;
+    }
+
     munmap((void *)virtio_bridge, MMAP_SIZE);
     for (int i = 0; i < MAX_ZONES; i++) {
         for (int j = 0; j < MAX_RAMS; j++)
@@ -1042,65 +1067,220 @@ void virtio_close() {
                        zone_mem[i][j][MEM_SIZE]);
             }
     }
-    mutithread_log_exit();
+    multithread_log_exit();
     log_warn("virtio daemon exit successfully");
 }
 
-void handle_virtio_requests() {
-    int sig;
-    sigset_t wait_set;
-    struct timespec timeout;
-    unsigned int req_front = virtio_bridge->req_front;
-    volatile struct device_req *req;
-    timeout.tv_sec = 0;
-    timeout.tv_nsec = WAIT_TIME;
-    sigemptyset(&wait_set);
-    sigaddset(&wait_set, SIGHVI);
-    sigaddset(&wait_set, SIGTERM);
-    virtio_bridge->need_wakeup = 1;
+// Ensure MAX_REQ is a power of two for bitwise masking to work correctly.
+_Static_assert((MAX_REQ != 0) && ((MAX_REQ & (MAX_REQ - 1)) == 0),
+               "MAX_REQ must be a power of 2");
 
+/**
+ * @brief Consumes pending VirtIO requests from the shared ring buffer
+ *
+ * This function implements a high-performance consumer that processes VirtIO
+ * requests from a circular shared buffer. It uses atomic operations and
+ * Dekker's algorithm to avoid race conditions and minimize unnecessary wakeups.
+ *
+ * The function performs the following operations:
+ * - Reads requests from the shared ring buffer using atomic operations
+ * - Processes each request by calling virtio_handle_req()
+ * - Implements busy-polling with a defined maximum count to avoid excessive CPU
+ * usage
+ * - Uses Dekker's algorithm to coordinate with the producer for efficient
+ * sleep/wakeup synchronization
+ *
+ * @return the number of requests successfully processed during this invocation
+ */
+static int consume_pending_requests(void) {
+    int proc_count = 0;
+
+    const uint32_t MAX_POLL_COUNT = 10000000;
+    uint32_t poll_count = 0;
+
+    // Pointers to indices in the shared virtio_bridge structure.
+    uint32_t *p_req_front = (uint32_t *)&virtio_bridge->req_front;
+    uint32_t *p_req_rear = (uint32_t *)&virtio_bridge->req_rear;
+    uint8_t *p_need_wakeup = (uint8_t *)&virtio_bridge->need_wakeup;
+
+    // Local copy of the front index to minimize shared memory reads
+    uint32_t req_front = __atomic_load_n(p_req_front, memory_order_relaxed);
+
+    // Inform the producer that we are active; no need to trigger eventfd
+    __atomic_store_n(p_need_wakeup, 0, memory_order_relaxed);
+
+    while (true) {
+        uint32_t req_rear = __atomic_load_n(p_req_rear, memory_order_relaxed);
+        if (req_front != req_rear) {
+            // Make Guest data visible to Host
+            __atomic_thread_fence(memory_order_acquire);
+
+            // Data available: reset poll counter and clear sleep intention
+            poll_count = 0;
+            ++proc_count;
+
+            struct device_req *req =
+                (struct device_req *)&virtio_bridge->req_list[req_front];
+            virtio_handle_req(req);
+
+            // Move to the next slot in the circular buffer
+            req_front = (req_front + 1U) & (uint32_t)(MAX_REQ - 1);
+
+            // Update the shared front index so the producer knows we've
+            // consumed the slot
+            __atomic_store_n(p_req_front, req_front, memory_order_release);
+        } else {
+            // No data: busy-poll for a defined period before deciding to sleep
+            if (++poll_count < MAX_POLL_COUNT) {
+                continue;
+            }
+            poll_count = 0;
+
+            /*
+             * Dekker's Algorithm Step 1: Signal intention to sleep.
+             * The producer will check this flag to decide whether to write to
+             * eventfd.
+             */
+            __atomic_store_n(p_need_wakeup, 1, memory_order_relaxed);
+
+            /*
+             * Dekker's Algorithm Step 2: Full System Memory Barrier.
+             * This prevents the Store (need_wakeup=1) from being reordered with
+             * the Load (req_rear), which is critical to avoid missing a late
+             * update.
+             */
+            __atomic_thread_fence(memory_order_seq_cst);
+
+            /*
+             * Dekker's Algorithm Step 3: Final re-check.
+             * Check if the producer added a request between our last check and
+             * setting the flag.
+             */
+            req_rear = __atomic_load_n(p_req_rear, memory_order_relaxed);
+            if (req_front == req_rear) {
+                // Confirmed empty: exit loop and enter epoll_wait in the caller
+                break;
+            }
+
+            // Race detected: producer added work, so clear flag and keep
+            // processing
+            __atomic_store_n(p_need_wakeup, 0, memory_order_relaxed);
+        }
+    }
+
+    return proc_count;
+}
+
+/**
+ * @brief Main event loop for handling VirtIO requests and system signals
+ *
+ * This function implements the core event loop for the VirtIO backend. It sets
+ * up signal handling and event notification mechanisms, then enters an infinite
+ * loop waiting for either VirtIO kick events from the kernel or termination
+ * signals.
+ *
+ * Key functionality includes:
+ * - Blocks SIGINT and SIGTERM signals for synchronous handling via signalfd
+ * - Creates and configures epoll instance to monitor both signalfd and eventfd
+ * - Initializes the shared memory state to indicate readiness for notifications
+ * - Processes incoming events using epoll_wait() with infinite timeout
+ * - Handles termination signals gracefully by cleaning up resources
+ * - Delegates VirtIO request processing to consume_pending_requests()
+ *
+ * @return void
+ *
+ * @note The function runs indefinitely until a termination signal is received
+ */
+void handle_virtio_requests(void) {
+    // Block signals to handle them synchronously via signalfd
+    sigset_t mask;
+    sigemptyset(&mask);
+    sigaddset(&mask, SIGINT);
+    sigaddset(&mask, SIGTERM);
+    if (sigprocmask(SIG_BLOCK, &mask, NULL) == -1) {
+        log_error("Failed to set sigprocmask");
+        return;
+    }
+
+    sfd = signalfd(-1, &mask, SFD_NONBLOCK | SFD_CLOEXEC);
+    if (sfd == -1) {
+        log_error("Failed to create signalfd");
+        return;
+    }
+
+    epoll_fd = epoll_create1(EPOLL_CLOEXEC);
+    if (epoll_fd == -1) {
+        log_error("Failed to create epoll instance");
+        close(sfd);
+        return;
+    }
+
+    // Register signalfd for termination handling
+    struct epoll_event ev;
+    ev.events = EPOLLIN;
+    ev.data.fd = sfd;
+    if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, sfd, &ev) == -1) {
+        log_error("epoll_ctl failed for signalfd");
+        close(sfd);
+        close(epoll_fd);
+        return;
+    }
+
+    // Register eventfd for kernel-to-user VirtIO kicks
+    ev.events = EPOLLIN;
+    ev.data.fd = efd;
+    if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, efd, &ev) == -1) {
+        log_error("epoll_ctl failed for eventfd");
+        close(sfd);
+        close(epoll_fd);
+        return;
+    }
+
+    // Initial state: Mark backend as ready to receive notifications
+    __atomic_store_n(&virtio_bridge->need_wakeup, 1, memory_order_relaxed);
+
+    log_info("virtio request handler loop started.");
     int signal_count = 0, proc_count = 0;
-    unsigned long long count = 0;
-    for (;;) {
+    struct epoll_event events[16];
+    while (true) {
 #ifndef LOONGARCH64
-        log_warn("signal_count is %d, proc_count is %d", signal_count,
+        log_info("signal_count is %d, proc_count is %d", signal_count,
                  proc_count);
-        sigwait(&wait_set, &sig); // change to no signal irq
-        signal_count++;
-        if (sig == SIGTERM) {
+
+        // Wait indefinitely for a signal or a kernel kick
+        int nfds = epoll_wait(epoll_fd, events, 16, -1);
+        ++signal_count;
+        if (nfds == -1) {
+            if (errno == EINTR)
+                continue;
+            log_error("epoll_wait failed");
             virtio_close();
             break;
-        } else if (sig != SIGHVI) {
-            log_error("unknown signal %d", sig);
-            continue;
         }
-#endif
-        while (1) {
-            if (!is_queue_empty(req_front, virtio_bridge->req_rear)) {
-                count = 0;
-                proc_count++;
-                req = &virtio_bridge->req_list[req_front];
-                virtio_bridge->need_wakeup = 0;
-                virtio_handle_req(req);
-                req_front = (req_front + 1) & (MAX_REQ - 1);
-                virtio_bridge->req_front = req_front;
-                write_barrier();
-            }
-#ifndef LOONGARCH64
-            else {
-                count++;
-                if (count < 10000000)
-                    continue;
-                count = 0;
-                virtio_bridge->need_wakeup = 1;
-                write_barrier();
-                nanosleep(&timeout, NULL);
-                if (is_queue_empty(req_front, virtio_bridge->req_rear)) {
-                    break;
+
+        for (int i = 0; i < nfds; ++i) {
+            if (events[i].data.fd == sfd) {
+                struct signalfd_siginfo fdsi;
+                if (read(sfd, &fdsi, sizeof(fdsi)) == sizeof(fdsi)) {
+                    log_info("Received termination signal %d. Exiting...",
+                             fdsi.ssi_signo);
+                    virtio_close();
+                    return;
                 }
-            }
+            } else if (events[i].data.fd == efd) {
+                uint64_t u;
+                // Clear the eventfd counter to acknowledge the notification
+                if (read(efd, &u, sizeof(uint64_t)) != sizeof(uint64_t)) {
+                    continue;
+                }
 #endif
+
+                // Process all pending requests until the ring is empty
+                proc_count += consume_pending_requests();
+#ifndef LOONGARCH64
+            }
         }
+#endif
     }
 }
 
@@ -1112,9 +1292,6 @@ void initialize_log() {
     log_level = LOG_WARN;
 #endif
     log_set_level(log_level);
-
-    FILE *log_file = fopen("log.txt", "w+");
-    log_add_fp(log_file, LOG_WARN);
 }
 
 int virtio_init() {
@@ -1147,6 +1324,20 @@ int virtio_init() {
     if (err) {
         log_error("ioctl failed, err code is %d", err);
         close(ko_fd);
+        exit(1);
+    }
+
+    // create eventfd
+    efd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    if (efd < 0) {
+        log_error("eventfd failed, errno is %d", errno);
+        close(ko_fd);
+        exit(1);
+    }
+    if (ioctl(ko_fd, HVISOR_SET_EVENTFD, efd) < 0) {
+        log_error("ioctl HVISOR_SET_EVENTFD failed, errno is %d", errno);
+        close(ko_fd);
+        close(efd);
         exit(1);
     }
 
@@ -1201,11 +1392,15 @@ int create_virtio_device_from_json(cJSON *device_json, int zone_id) {
 
     // Get base_addr, len, irq_id (mmio region base address and length, device
     // interrupt number)
-    base_addr = strtoul(
-        SAFE_CJSON_GET_OBJECT_ITEM(device_json, "addr")->valuestring, NULL, 16);
-    len = strtoul(SAFE_CJSON_GET_OBJECT_ITEM(device_json, "len")->valuestring,
-                  NULL, 16);
-    irq_id = SAFE_CJSON_GET_OBJECT_ITEM(device_json, "irq")->valueint;
+    if (parse_json_u64(SAFE_CJSON_GET_OBJECT_ITEM(device_json, "addr"),
+                       &base_addr) != 0 ||
+        parse_json_u64(SAFE_CJSON_GET_OBJECT_ITEM(device_json, "len"), &len) !=
+            0 ||
+        parse_json_u32(SAFE_CJSON_GET_OBJECT_ITEM(device_json, "irq"),
+                       &irq_id) != 0) {
+        log_error("failed to parse addr, len, or irq");
+        return -1;
+    }
 
     // Handle other fields according to the device type
     if (dev_type == VirtioTBlock) {
@@ -1219,8 +1414,11 @@ int create_virtio_device_from_json(cJSON *device_json, int zone_id) {
         cJSON *mac_json = SAFE_CJSON_GET_OBJECT_ITEM(device_json, "mac");
         uint8_t mac[6];
         for (int i = 0; i < 6; i++) {
-            mac[i] = strtoul(
-                SAFE_CJSON_GET_ARRAY_ITEM(mac_json, i)->valuestring, NULL, 16);
+            if (parse_json_u8(SAFE_CJSON_GET_ARRAY_ITEM(mac_json, i),
+                              &mac[i]) != 0) {
+                log_error("failed to parse mac address");
+                return -1;
+            }
         }
         arg0 = mac, arg1 = tap;
     } else if (dev_type == VirtioTConsole) {
@@ -1238,10 +1436,14 @@ int create_virtio_device_from_json(cJSON *device_json, int zone_id) {
         requested_state =
             (GPURequestedState *)malloc(sizeof(GPURequestedState));
         memset(requested_state, 0, sizeof(GPURequestedState));
-        requested_state->width =
-            SAFE_CJSON_GET_OBJECT_ITEM(device_json, "width")->valueint;
-        requested_state->height =
-            SAFE_CJSON_GET_OBJECT_ITEM(device_json, "height")->valueint;
+        if (parse_json_u32(SAFE_CJSON_GET_OBJECT_ITEM(device_json, "width"),
+                           &requested_state->width) != 0 ||
+            parse_json_u32(SAFE_CJSON_GET_OBJECT_ITEM(device_json, "height"),
+                           &requested_state->height) != 0) {
+            log_error("failed to parse gpu width or height");
+            free(requested_state);
+            return -1;
+        }
         arg0 = requested_state;
         arg1 = NULL;
 #else
@@ -1292,7 +1494,13 @@ int virtio_start_from_json(char *json_path) {
         cJSON *memory_region_json =
             SAFE_CJSON_GET_OBJECT_ITEM(zone_json, "memory_region");
         cJSON *devices_json = SAFE_CJSON_GET_OBJECT_ITEM(zone_json, "devices");
-        zone_id = zone_id_json->valueint;
+        uint32_t parsed_zone_id;
+        if (parse_json_u32(zone_id_json, &parsed_zone_id) != 0) {
+            log_error("failed to parse zone id");
+            err = -1;
+            goto err_out;
+        }
+        zone_id = (int)parsed_zone_id;
         if (zone_id >= MAX_ZONES) {
             log_error("Exceed maximum zone number");
             err = -1;
@@ -1304,17 +1512,23 @@ int virtio_start_from_json(char *json_path) {
         for (int j = 0; j < num_mems; j++) {
             cJSON *mem_region =
                 SAFE_CJSON_GET_ARRAY_ITEM(memory_region_json, j);
-            zone0_ipa = (void *)(uintptr_t)strtoull(
-                SAFE_CJSON_GET_OBJECT_ITEM(mem_region, "zone0_ipa")
-                    ->valuestring,
-                NULL, 16);
-            zonex_ipa = (void *)(uintptr_t)strtoull(
-                SAFE_CJSON_GET_OBJECT_ITEM(mem_region, "zonex_ipa")
-                    ->valuestring,
-                NULL, 16);
-            mem_size = strtoull(
-                SAFE_CJSON_GET_OBJECT_ITEM(mem_region, "size")->valuestring,
-                NULL, 16);
+            uintptr_t zone0_ipa_val = 0, zonex_ipa_val = 0;
+            uint64_t mem_size_val = 0;
+            if (parse_json_address(
+                    SAFE_CJSON_GET_OBJECT_ITEM(mem_region, "zone0_ipa"),
+                    &zone0_ipa_val) != 0 ||
+                parse_json_address(
+                    SAFE_CJSON_GET_OBJECT_ITEM(mem_region, "zonex_ipa"),
+                    &zonex_ipa_val) != 0 ||
+                parse_json_u64(SAFE_CJSON_GET_OBJECT_ITEM(mem_region, "size"),
+                               &mem_size_val) != 0) {
+                log_error("failed to parse memory region");
+                err = -1;
+                goto err_out;
+            }
+            zone0_ipa = (void *)zone0_ipa_val;
+            zonex_ipa = (void *)zonex_ipa_val;
+            mem_size = mem_size_val;
             if (mem_size == 0) {
                 log_error("Invalid memory size");
                 continue;
