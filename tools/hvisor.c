@@ -500,28 +500,6 @@ static int parse_pci_config(cJSON *root, zone_config_t *config) {
         log_error("Exceeded maximum allowed pci configs.");
         goto err_out;
     }
-    // cJSON *ecam_base_json =
-    //     SAFE_CJSON_GET_OBJECT_ITEM(pci_configs_json, "ecam_base");
-    // cJSON *io_base_json =
-    //     SAFE_CJSON_GET_OBJECT_ITEM(pci_configs_json, "io_base");
-    // cJSON *pci_io_base_json =
-    //     SAFE_CJSON_GET_OBJECT_ITEM(pci_configs_json, "pci_io_base");
-    // cJSON *mem32_base_json =
-    //     SAFE_CJSON_GET_OBJECT_ITEM(pci_configs_json, "mem32_base");
-    // cJSON *pci_mem32_base_json =
-    //     SAFE_CJSON_GET_OBJECT_ITEM(pci_configs_json, "pci_mem32_base");
-    // cJSON *mem64_base_json =
-    //     SAFE_CJSON_GET_OBJECT_ITEM(pci_configs_json, "mem64_base");
-    // cJSON *pci_mem64_base_json =
-    //     SAFE_CJSON_GET_OBJECT_ITEM(pci_configs_json, "pci_mem64_base");
-    // cJSON *ecam_size_json =
-    //     SAFE_CJSON_GET_OBJECT_ITEM(pci_configs_json, "ecam_size");
-    // cJSON *io_size_json =
-    //     SAFE_CJSON_GET_OBJECT_ITEM(pci_configs_json, "io_size");
-    // cJSON *mem32_size_json =
-    //     SAFE_CJSON_GET_OBJECT_ITEM(pci_configs_json, "mem32_size");
-    // cJSON *mem64_size_json =
-    //     SAFE_CJSON_GET_OBJECT_ITEM(pci_configs_json, "mem64_size");
 
     config->num_pci_bus = num_pci_bus;
     log_info("num pci bus %d", num_pci_bus);
@@ -612,14 +590,11 @@ static int parse_pci_config(cJSON *root, zone_config_t *config) {
         //          pci_config->mem64_base, pci_config->mem64_size,
         //          pci_config->pci_mem64_base);
     }
-    log_info("114514");
     cJSON *alloc_pci_devs_json =
         SAFE_CJSON_GET_OBJECT_ITEM(root, "alloc_pci_devs");
     int num_pci_devs = SAFE_CJSON_GET_ARRAY_SIZE(alloc_pci_devs_json);
     config->num_pci_devs = num_pci_devs;
-    log_info("114514: size:%d",num_pci_devs);
     for (int i = 0; i < num_pci_devs; i++) {
-        log_info("114514:iter:%d",i);
         cJSON *dev_config_json =
             SAFE_CJSON_GET_ARRAY_ITEM(alloc_pci_devs_json, i);
         hv_pci_dev_config_t *dev_config = &config->alloc_pci_devs[i];
@@ -647,7 +622,6 @@ static int parse_pci_config(cJSON *root, zone_config_t *config) {
     }
     return 0;
 err_out:
-// while(1);
     return -1;
 }
 

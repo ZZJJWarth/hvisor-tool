@@ -165,30 +165,22 @@ inline void rw_barrier(void) {
 }
 
 // create a virtio device.
-// 这个函数就是实际上创建virtio设备的函数，前面我们通过读取一个json文件来获取virtio的配置，并转换为这个函数的参数
 VirtIODevice *create_virtio_device(VirtioDeviceType dev_type, uint32_t zone_id,
                                    uint64_t base_addr, uint64_t len,
                                    uint32_t irq_id, void *arg0, void *arg1) {
-    // 首先我们打印一个信息
                                     log_info(
         "create virtio device type %s, zone id %d, base addr %lx, len %lx, "
         "irq id %d",
         virtio_device_type_to_string(dev_type), zone_id, base_addr, len,
         irq_id);
-    // 创建一个VirtIODevice结构
     VirtIODevice *vdev = NULL;
-    // 这个是错误码
     int is_err;
-    // 给vdev在堆上分配内存
     vdev = calloc(1, sizeof(VirtIODevice));
-    // 内存分配判断
     if (vdev == NULL) {
         log_error("failed to allocate virtio device");
         return NULL;
     }
-    // 此函数对regs进行了简单的赋值
     init_mmio_regs(&vdev->regs, dev_type);
-    // 设置对应的变量
     vdev->base_addr = base_addr;
     vdev->len = len;
     vdev->zone_id = zone_id;
@@ -198,7 +190,6 @@ VirtIODevice *create_virtio_device(VirtioDeviceType dev_type, uint32_t zone_id,
     log_info("debug: vdev->base_addr is %lx, vdev->len is %lx, vdev->zone_id "
              "is %d, vdev->irq_id is %d",
              vdev->base_addr, vdev->len, vdev->zone_id, vdev->irq_id);
-    // 开始进入不同类型的逻辑
     switch (dev_type) {
     case VirtioTBlock:
         vdev->regs.dev_feature = BLK_SUPPORTED_FEATURES;
@@ -216,13 +207,9 @@ VirtIODevice *create_virtio_device(VirtioDeviceType dev_type, uint32_t zone_id,
         break;
 
     case VirtioTConsole:
-    // 如果是VirtioConsole，则设置feature
         vdev->regs.dev_feature = CONSOLE_SUPPORTED_FEATURES;
-    // 随后从init_console_dev中生成一个dev
         vdev->dev = init_console_dev();
-    // 这个队列初始化似乎是很重要的方法，它为vdev初始化了virtqueue,主要是给vdev挂载了一个vqs,同时对vqs进行了初始化（注册了一个handler）
         init_virtio_queue(vdev, dev_type);
-    // 最后进行virtio_console的init
         is_err = virtio_console_init(vdev);
         break;
     case VirtioTRng:
@@ -274,9 +261,7 @@ err:
     return NULL;
 }
 
-// 它接受一个通用的virtiodev和它的类型
 void init_virtio_queue(VirtIODevice *vdev, VirtioDeviceType type) {
-    // 首先定义一个VirtQueue
     VirtQueue *vqs = NULL;
 
     log_info("Initializing virtio queue for zone:%d, device type:%s",
@@ -307,21 +292,15 @@ void init_virtio_queue(VirtIODevice *vdev, VirtioDeviceType type) {
         break;
 
     case VirtioTConsole:
-        // 对于console来说，我们将vqs的长度设置为一个定值,这里定义为2
         vdev->vqs_len = CONSOLE_MAX_QUEUES;
-        // 同时为vqs进行初始化，可以看出，这个vqs一个是一个Virtqueue的数组
         vqs = malloc(sizeof(VirtQueue) * CONSOLE_MAX_QUEUES);
-        // 这个循环会初始化所有的vqs
         for (int i = 0; i < CONSOLE_MAX_QUEUES; ++i) {
-            // 这个函数会将vqs中的字段清零，除了handler,dev和max que len,同时初始化一个锁和idx,idx就是i
             virtqueue_reset(vqs, i);
             vqs[i].queue_num_max = VIRTQUEUE_CONSOLE_MAX_SIZE;
             vqs[i].dev = vdev;
         }
-        // 第0个vqs的handler设置为rxq
         vqs[CONSOLE_QUEUE_RX].notify_handler =
             virtio_console_rxq_notify_handler;
-        // 第1个vqs的handler设置为txq
         vqs[CONSOLE_QUEUE_TX].notify_handler =
             virtio_console_txq_notify_handler;
         vdev->vqs = vqs;
@@ -357,7 +336,6 @@ void init_virtio_queue(VirtIODevice *vdev, VirtioDeviceType type) {
     }
 }
 
-// 此函数仅仅给virtiodevice中的regs变量进行了赋值
 void init_mmio_regs(VirtMmioRegs *regs, VirtioDeviceType type) {
     log_info("initializing mmio registers for %s",
              virtio_device_type_to_string(type));
@@ -498,21 +476,17 @@ int process_descriptor_chain(VirtQueue *vq, uint16_t *desc_idx,
     last_avail_idx = vq->last_avail_idx;
 
     // No new requests
-    // last_avail_idx表示的是上次kick时，idx的位置。如果此时的idx还是上次的idx,那么我们就啥都不干
     if (last_avail_idx == vq->avail_ring->idx)
         return 0;
 
     // Update to the index to be processed during this kick
-    // 如果确实不是，那么我们就更新
     vq->last_avail_idx++;
 
     // Get the index of the first available descriptor
-    // 需要注意，ring本身就是一个u16数组，所以desc_idx其实就是新来的idx（其实这里这个last_avail_idx有点多余了）
     *desc_idx = next = vq->avail_ring->ring[last_avail_idx & (vq->num - 1)];
     // Record the length of the descriptor chain to chain_len
     for (i = 0; i < (int)vq->num; i++, next = vdesc->next) {
         // Get a descriptor
-        // vdesc就直接获取了对应的描述符
         vdesc = &vq->desc_table[next];
         // TODO: vdesc->len may not be chain_len, virtio specification doesn't
         // say it.

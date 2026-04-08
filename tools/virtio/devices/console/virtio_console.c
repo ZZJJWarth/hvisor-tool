@@ -23,7 +23,6 @@
 
 static uint8_t trashbuf[1024];
 
-// 这是console dev的生成函数，其实就是生成一个console专有的结构，然后进行初始化并返回
 ConsoleDev *init_console_dev() {
     ConsoleDev *dev = (ConsoleDev *)malloc(sizeof(ConsoleDev));
     dev->config.cols = 80;
@@ -35,7 +34,6 @@ ConsoleDev *init_console_dev() {
     return dev;
 }
 
-// 根据框架的理解，我们会在读取伪终端的时候，我们会出发monitor的epoll,epoll会执行这个handler
 static void virtio_console_event_handler(int fd, int epoll_type, void *param) {
     // log_debug("%s", __func__);
     VirtIODevice *vdev = (VirtIODevice *)param;
@@ -58,7 +56,6 @@ static void virtio_console_event_handler(int fd, int epoll_type, void *param) {
         read(dev->master_fd, trashbuf, sizeof(trashbuf));
         return;
     }
-    // 如果virtqueue当前是空闲的
     if (virtqueue_is_empty(vq)) {
         read(dev->master_fd, trashbuf, sizeof(trashbuf));
         virtio_inject_irq(vq);
@@ -90,14 +87,11 @@ static void virtio_console_event_handler(int fd, int epoll_type, void *param) {
     return;
 }
 
-// 从这里开始看virtio console的初始化 
 int virtio_console_init(VirtIODevice *vdev) {
-    // 首先我们先获得console的设备数据结构
     ConsoleDev *dev = (ConsoleDev *)vdev->dev;
     int master_fd, slave_fd;
     char *slave_name;
     struct termios term_io;
-    // 这里打开了一个伪终端主设备
     master_fd = posix_openpt(O_RDWR | O_NOCTTY);
     if (master_fd < 0) {
         log_error("Failed to open master pty, errno is %d", errno);
@@ -108,9 +102,7 @@ int virtio_console_init(VirtIODevice *vdev) {
     if (unlockpt(master_fd) < 0) {
         log_error("Failed to unlock pty, errno is %d", errno);
     }
-    // 如果申请成功，则将fd赋值给dev
     dev->master_fd = master_fd;
-    // 从主伪终端中可以获取从伪中断的名字
     slave_name = ptsname(master_fd);
     if (slave_name == NULL) {
         log_error("Failed to get slave name, errno is %d", errno);
@@ -143,7 +135,6 @@ int virtio_console_init(VirtIODevice *vdev) {
         log_error("Failed to set nonblocking mode, fd closed!");
         return -1;
     }
-    // 最后我们注册一个event
     dev->event =
         add_event(dev->master_fd, EPOLLIN, virtio_console_event_handler, vdev);
 
