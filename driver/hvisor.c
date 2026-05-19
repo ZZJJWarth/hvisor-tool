@@ -27,43 +27,45 @@
 #include <linux/uaccess.h>
 #include <linux/version.h>
 #include <linux/vmalloc.h>
-#include <linux/random.h>
 
 #include "hvisor.h"
+#include "virtio_pci_backend.h"
 #include "zone_config.h"
 
 struct virtio_bridge *virtio_bridge;
-struct virtio_pci_bridge *virtio_pci_bridge;
 int virtio_irq = -1;
-int virtio_pci_irq_config = -1;
-int virtio_pci_irq_data = -1;
 static struct task_struct *task = NULL;
-static struct virtio_pci_dev virtpci_dev_list[MAX_VIRTPCI_DEV];
-static int nxt_dev_idx = 0;
 struct eventfd_ctx *virtio_irq_ctx = NULL;
 
 // initial virtio el2 shared region
 static int hvisor_init_virtio(void) {
     int err;
+
     if (virtio_irq == -1) {
         pr_err("virtio device is not available\n");
         return ENOTTY;
     }
     virtio_bridge = (struct virtio_bridge *)__get_free_pages(GFP_KERNEL, 0);
-    virtio_pci_bridge = (struct virtio_pci_bridge *)__get_free_pages(GFP_KERNEL, 0);
     if (virtio_bridge == NULL)
         return -ENOMEM;
-    if (virtio_pci_bridge == NULL)
-        return -ENOMEM;
     SetPageReserved(virt_to_page(virtio_bridge));
-    SetPageReserved(virt_to_page(virtio_pci_bridge));
+    err = hvisor_virtio_pci_alloc_bridge();
+    if (err)
+        goto err_free_virtio_bridge;
     // init device region
     memset(virtio_bridge, 0, sizeof(struct virtio_bridge));
-    memset(virtio_pci_bridge, 0, sizeof(struct virtio_pci_bridge));
     err = hvisor_call(HVISOR_HC_INIT_VIRTIO, __pa(virtio_bridge), __pa(virtio_pci_bridge));
     if (err)
-        return err;
+        goto err_free_virtio_pci_bridge;
     return 0;
+
+err_free_virtio_pci_bridge:
+    hvisor_virtio_pci_free_bridge();
+err_free_virtio_bridge:
+    ClearPageReserved(virt_to_page(virtio_bridge));
+    free_pages((unsigned long)virtio_bridge, 0);
+    virtio_bridge = NULL;
+    return err;
 }
 
 // finish virtio req and send result to el2
@@ -379,133 +381,7 @@ static irqreturn_t virtio_irq_handler(int irq, void *dev_id) {
     return IRQ_HANDLED;
 }
 
-static int create_virtio_pci_dev(__u16 num_of_vq,struct virtqueue_info* vqs,__u16 features,void (*handler)(struct virtqueue_info*,int q_id)){
-    
-    if(nxt_dev_idx >= MAX_VIRTPCI_DEV){
-        pr_err("nxt_dev_idx >= MAX_VIRTPCI_DEV there are too much device!\n");
-        return 0;
-    }
-    if(num_of_vq > MAX_VQ){
-        pr_err("num_of_vq > MAX_VQ there are too much virtqueu in the virtio device\n");
-        return 0;
-    }
-    struct virtio_pci_dev* birth = &virtpci_dev_list[nxt_dev_idx];
-    birth->num_of_vq = num_of_vq;
-    int i = 0;
-    while(i < num_of_vq){
-        // we assume that the virtqueueu area is consecutive and not bigger than 0x2000
-        // TODO: Get the exact size of virtqueue area here
-        void *addr = memremap(vqs[i].desc_area,0x2000,MEMREMAP_WB);
-        if(!addr){
-            pr_info("addr memremap failed!\n");
-            return IRQ_HANDLED;
-        }else{
-            pr_info("addr memremap success\n");
-        }
-        birth->vqs[i].desc_area = addr;
-        birth->vqs[i].avail_area = addr + (vqs[i].avail_area - vqs[i].desc_area);
-        birth->vqs[i].used_area = addr + (vqs[i].used_area - vqs[i].desc_area);
-        i++;
-    }
-
-    birth->features = features;
-    birth->data_req_handler = handler;
-    return nxt_dev_idx++;
-}
-
-static void virtio_rng_handler(struct virtqueue_info *vq,int queue_id){
-    struct virtq_desc *desc = vq->desc_area;
-    struct virtq_avail *avail = vq->avail_area;
-    struct virtq_used *used = vq->used_area;
-    if(desc == NULL || avail == NULL || used == NULL){
-        pr_err("desc :0x%x,avail:0x%x,used:0x%x\n");
-        return IRQ_HANDLED;
-    }
-    int avail_idx = avail->idx;
-    int used_idx = used->idx;
-    {
-        int i = used_idx;
-        while(i<avail->idx){
-            int j = i%256;
-            int avail_ring_content = avail->ring[j];
-            struct virtq_desc desc_item = desc[avail_ring_content];
-            struct virtq_used_elem uitem;
-            void* buffer = memremap(desc_item.addr,desc_item.len,MEMREMAP_WB);
-            if(buffer == NULL){
-                pr_err("mem err in RNG!");
-            }else{
-                // memset(buffer,'Z',desc_item.len);
-                get_random_bytes(buffer, desc_item.len);
-                memunmap(buffer);
-            }
-            uitem.id = avail_ring_content;
-            uitem.len = desc_item.len;
-            used->ring[j] = uitem;
-            i++;
-        }
-        used->idx = i;
-    }
-    
-    return IRQ_HANDLED;
-}
-
-static irqreturn_t virtio_pci_irq_config_handler(int irq, void *dev_id){
-    return IRQ_WAKE_THREAD;
-}
-
-static irqreturn_t virtio_pci_irq_config_thread_handler(int irq,void *dev_id){
-    if(virtio_pci_bridge == NULL){
-        pr_err("virtio_pci_bridge has not been initialized!");
-        return IRQ_HANDLED;
-    }
-    void (*handler)(struct virtqueue_info*,int ) = NULL;
-    struct virtio_pci_config_info *info = &virtio_pci_bridge->config;
-    switch(info->dtype){
-        case VIRTIO_PCI_RNG:
-            handler = virtio_rng_handler;
-            break;
-        default:
-            break;
-    }
-    info->dev_id = create_virtio_pci_dev(info->num_of_queues,info->vqs,info->features,handler);
-     
-    return IRQ_HANDLED;
-}
-
-static irqreturn_t virtio_pci_irq_data_handler(int irq,void *dev_id){
-    return IRQ_WAKE_THREAD;
-}
-
-static irqreturn_t virtio_pci_irq_data_thread_handler(int irq,void *dev_id){
-    if(virtio_pci_bridge == NULL){
-        pr_err("virtio_pci_bridge has not been initialized!\n");
-        return IRQ_HANDLED;
-    }
-
-    struct virtio_pci_data_info *info = &virtio_pci_bridge->data;
-    __u64 dev_idx = info->dev_id;
-    __u64 queue_id = info->queue_id;
-    __u64 cpu_id = info->cpu_id;
-    __u64 data_req_id = dev_idx | (queue_id << 16) | (cpu_id<<32);
-    if(dev_idx>=nxt_dev_idx){
-        pr_err("the dev_idx given by hvisor is invaild!\n");
-        return IRQ_HANDLED;
-    }
-    
-
-    struct virtio_pci_dev *dev = &virtpci_dev_list[dev_idx];
-    if(queue_id > dev->num_of_vq){
-        pr_err("the queue_id given by hvisor is invaild!\n");
-        return IRQ_HANDLED;
-    }
-    struct virtqueue_info *vq = &dev->vqs[queue_id];
-
-    if(dev->data_req_handler != NULL){
-        dev->data_req_handler(vq,queue_id);
-    }
-    hvisor_call(HVISOR_HC_VIRTIO_PCI_DONE,data_req_id,0);
-    return IRQ_HANDLED;
-}
+#include "virtio_pci_backend.c"
 
 #undef X86_64
 
@@ -514,7 +390,7 @@ static irqreturn_t virtio_pci_irq_data_thread_handler(int irq,void *dev_id){
 */
 static int __init hvisor_init(void) {
     int err;
-    struct device_node *node = NULL,*virtio_pci_node_config = NULL,*virtio_pci_node_data = NULL;
+    struct device_node *node = NULL;
     // u32 *irq;
     err = misc_register(&hvisor_misc_dev);
     if (err) {
@@ -526,8 +402,6 @@ static int __init hvisor_init(void) {
     // The irq number must be retrieved from dtb node, because it is different
     // from GIC's IRQ number.
     node = of_find_node_by_path("/hvisor_virtio_device");
-    virtio_pci_node_config = of_find_node_by_path("/hvisor_virtio_pci_config");
-    virtio_pci_node_data = of_find_node_by_path("/hvisor_virtio_pci_data");
     
     if (!node) {
         pr_err("Critical: Missing device tree node!\n");
@@ -538,30 +412,9 @@ static int __init hvisor_init(void) {
         pr_err("   };\n");
         return -ENODEV;
     }
-    if(virtio_pci_node_config != NULL&&virtio_pci_node_data != NULL){
-        virtio_pci_irq_config = of_irq_get(virtio_pci_node_config,0);
-        virtio_pci_irq_data = of_irq_get(virtio_pci_node_data,0);
-        pr_info("virtio_pci_irq = %d\n", virtio_pci_irq_config);
-        pr_info("virtio_pci_irq_data = %d\n",virtio_pci_irq_data);
-        err = request_threaded_irq(virtio_pci_irq_config,
-                            virtio_pci_irq_config_handler,
-                            virtio_pci_irq_config_thread_handler,
-                            0,
-                            "hvisor_virtio_pci_config",
-                            NULL);
-        pr_info("err is :%d\n",err);
-        err = request_threaded_irq(virtio_pci_irq_data,
-                                virtio_pci_irq_data_handler,
-                                virtio_pci_irq_data_thread_handler,
-                                0,
-                                "hvisor_virtio_pci_data",
-                                NULL);
-        pr_info("err is :%d\n",err);
-        of_node_put(virtio_pci_node_config);
-        of_node_put(virtio_pci_node_data);
-    }else{
-        pr_info("Emulated Virtio-PCI is not enabled due to absence of necessary dts nodes\n");
-    }
+    err = hvisor_virtio_pci_init();
+    if (err)
+        goto err_out;
     
     virtio_irq = of_irq_get(node, 0);
 
@@ -589,6 +442,7 @@ static int __init hvisor_init(void) {
     return 0;
 err_out:
     pr_err("hvisor cannot register IRQ, err is %d\n", err);
+    hvisor_virtio_pci_exit();
     if (virtio_irq != -1)
         free_irq(virtio_irq, &hvisor_misc_dev);
     misc_deregister(&hvisor_misc_dev);
@@ -599,6 +453,7 @@ err_out:
 ** Module Exit function
 */
 static void __exit hvisor_exit(void) {
+    hvisor_virtio_pci_exit();
     if (virtio_irq != -1)
         free_irq(virtio_irq, &hvisor_misc_dev);
     if (virtio_irq_ctx)
@@ -607,6 +462,7 @@ static void __exit hvisor_exit(void) {
         ClearPageReserved(virt_to_page(virtio_bridge));
         free_pages((unsigned long)virtio_bridge, 0);
     }
+    hvisor_virtio_pci_free_bridge();
     misc_deregister(&hvisor_misc_dev);
     pr_info("hvisor exit!!!\n");
 }

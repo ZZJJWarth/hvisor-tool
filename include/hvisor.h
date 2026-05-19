@@ -25,6 +25,9 @@
 #define SIGHVI 10
 #define MAX_VQ 16
 #define MAX_VIRTPCI_DEV 8
+#define MAX_PCI_CONFIG_REQ 4
+#define MAX_PCI_CONFIG_RES 4
+#define MAX_PCI_DATA_REQ 32
 // receive request from el2
 struct device_req {
     __u64 src_cpu;
@@ -65,6 +68,7 @@ struct virtqueue_info{
     __u64 desc_area;
     __u64 avail_area;
     __u64 used_area;
+    __u64 queue_size;
 };
 
 struct virtio_pci_config_info{
@@ -72,22 +76,46 @@ struct virtio_pci_config_info{
     __u16 dev_id;
     __u16 num_of_queues;
     __u16 dtype;
+    __u16 padding;
     struct virtqueue_info vqs[MAX_VQ];
-    
-    
+};
+
+struct virtio_pci_config_req{
+    __u32 request_id;
+    __u32 padding;
+    struct virtio_pci_config_info info;
+};
+
+struct virtio_pci_config_res{
+    __u32 request_id;
+    __u32 status;
+    __u16 dev_id;
+    __u16 padding;
 };
 
 struct virtio_pci_data_info{
     __u16 dev_id;
     __u16 queue_id;
     __u16 cpu_id;
-    __u16 _padding;
+    __u16 msix_vector_idx;
+};
+
+struct virtio_pci_data_req{
+    __u32 request_id;
+    __u32 padding;
+    struct virtio_pci_data_info info;
 };
 
 struct virtio_pci_bridge{
-    struct virtio_pci_config_info config;
-    struct virtio_pci_data_info data;
-    struct virtqueue_info req_list[128];
+    __u32 config_req_front;
+    __u32 config_req_rear;
+    __u32 config_res_front;
+    __u32 config_res_rear;
+    __u32 data_req_front;
+    __u32 data_req_rear;
+    struct virtio_pci_config_req config_req_list[MAX_PCI_CONFIG_REQ];
+    struct virtio_pci_config_res config_res_list[MAX_PCI_CONFIG_RES];
+    struct virtio_pci_data_req data_req_list[MAX_PCI_DATA_REQ];
 };
 
 struct virtq_desc{
@@ -111,13 +139,13 @@ struct virtq_used_elem{
 struct virtq_used{
     __u16 flags;
     __u16 idx;
-    struct virtq_used_elem ring[]
+    struct virtq_used_elem ring[];
 };
 
 struct virtio_pci_dev{
     __u16 num_of_vq;
     struct virtqueue_info vqs[MAX_VQ];
-    __u16 features;
+    __u64 features;
     void (*data_req_handler)(struct virtqueue_info*,int queue_id);
 };
 
