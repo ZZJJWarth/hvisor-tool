@@ -12,6 +12,7 @@
 #include <linux/io.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
+#include <linux/moduleparam.h>
 #include <linux/of.h>
 #include <linux/of_irq.h>
 #include <linux/random.h>
@@ -27,6 +28,24 @@ static int virtio_pci_irq_config = -1;
 static int virtio_pci_irq_data = -1;
 static struct virtio_pci_dev virtpci_dev_list[MAX_VIRTPCI_DEV];
 static int nxt_dev_idx;
+static bool virtio_pci_test_init_timeout_once;
+
+module_param_named(virtio_pci_test_init_timeout_once,
+                   virtio_pci_test_init_timeout_once, bool, 0644);
+MODULE_PARM_DESC(virtio_pci_test_init_timeout_once,
+                 "Drop one virtio-pci config response to trigger hvisor init timeout");
+
+static void virtio_pci_write_hypercall_info(__u16 op, __u32 target_cpu,
+                                            __u32 request_id, __u32 status) {
+    struct virtio_pci_hypercall_info *info = &virtio_pci_bridge->hypercall_info;
+
+    WRITE_ONCE(info->version, VIRTIO_PCI_HYPERCALL_VERSION);
+    WRITE_ONCE(info->op, op);
+    WRITE_ONCE(info->target_cpu, target_cpu);
+    WRITE_ONCE(info->request_id, request_id);
+    WRITE_ONCE(info->status, status);
+    smp_wmb();
+}
 
 static size_t virtio_avail_ring_size(__u64 queue_size) {
     return sizeof(__u16) * 2 + sizeof(__u16) * queue_size;
@@ -225,6 +244,13 @@ static irqreturn_t virtio_pci_irq_config_thread_handler(int irq, void *dev_id) {
         struct virtio_pci_config_info *info = &req.info;
         int ret;
 
+        if (virtio_pci_test_init_timeout_once) {
+            virtio_pci_test_init_timeout_once = false;
+            pr_warn("virtio pci test: drop config response for request %u\n",
+                    req.request_id);
+            continue;
+        }
+
         switch (info->dtype) {
         case VIRTIO_PCI_RNG:
             handler = virtio_rng_handler;
@@ -263,8 +289,7 @@ static irqreturn_t virtio_pci_irq_data_thread_handler(int irq, void *dev_id) {
         struct virtio_pci_data_info *info = &req.info;
         __u64 dev_idx = info->dev_id;
         __u64 queue_id = info->queue_id;
-        __u64 cpu_id = info->cpu_id;
-        __u64 data_req_id = dev_idx | (queue_id << 16) | (cpu_id << 32);
+        __u32 cpu_id = info->cpu_id;
         struct virtio_pci_dev *dev;
         struct virtqueue_info *vq;
 
@@ -282,7 +307,9 @@ static irqreturn_t virtio_pci_irq_data_thread_handler(int irq, void *dev_id) {
 
         if (dev->data_req_handler != NULL)
             dev->data_req_handler(vq, queue_id);
-        hvisor_call(HVISOR_HC_VIRTIO_PCI_DONE, data_req_id, 0);
+        virtio_pci_write_hypercall_info(VIRTIO_PCI_HC_OP_DATA_REQ_COMPLETE,
+                                        cpu_id, req.request_id, 0);
+        hvisor_call(HVISOR_HC_VIRTIO_PCI, VIRTIO_PCI_HC_DOORBELL, 0);
     }
     return IRQ_HANDLED;
 }
@@ -294,6 +321,7 @@ int hvisor_virtio_pci_alloc_bridge(void) {
 
     SetPageReserved(virt_to_page(virtio_pci_bridge));
     memset(virtio_pci_bridge, 0, sizeof(struct virtio_pci_bridge));
+    virtio_pci_write_hypercall_info(VIRTIO_PCI_HC_OP_NONE, 0, 0, 0);
     return 0;
 }
 

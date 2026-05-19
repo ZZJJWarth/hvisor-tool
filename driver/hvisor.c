@@ -54,7 +54,11 @@ static int hvisor_init_virtio(void) {
         goto err_free_virtio_bridge;
     // init device region
     memset(virtio_bridge, 0, sizeof(struct virtio_bridge));
-    err = hvisor_call(HVISOR_HC_INIT_VIRTIO, __pa(virtio_bridge), __pa(virtio_pci_bridge));
+    err = hvisor_call(HVISOR_HC_INIT_VIRTIO, __pa(virtio_bridge), 0);
+    if (err)
+        goto err_free_virtio_pci_bridge;
+    err = hvisor_call(HVISOR_HC_VIRTIO_PCI, VIRTIO_PCI_HC_INIT,
+                      __pa(virtio_pci_bridge));
     if (err)
         goto err_free_virtio_pci_bridge;
     return 0;

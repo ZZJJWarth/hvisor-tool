@@ -28,7 +28,28 @@
 #define MAX_PCI_CONFIG_REQ 4
 #define MAX_PCI_CONFIG_RES 4
 #define MAX_PCI_DATA_REQ 32
+#define VIRTIO_PCI_HYPERCALL_VERSION 1
 // receive request from el2
+enum virtio_pci_hypercall_op {
+    VIRTIO_PCI_HC_OP_NONE = 0,
+    VIRTIO_PCI_HC_OP_CONFIG_REQ_COMPLETE = 1,
+    VIRTIO_PCI_HC_OP_DATA_REQ_COMPLETE = 2,
+    VIRTIO_PCI_HC_OP_RESET = 3,
+};
+
+enum virtio_pci_hypercall_mode {
+    VIRTIO_PCI_HC_INIT = 0,
+    VIRTIO_PCI_HC_DOORBELL = 1,
+};
+
+struct virtio_pci_hypercall_info {
+    __u16 version;
+    __u16 op;
+    __u32 target_cpu;
+    __u32 request_id;
+    __u32 status;
+};
+
 struct device_req {
     __u64 src_cpu;
     __u64 address; // zone's ipa
@@ -107,6 +128,7 @@ struct virtio_pci_data_req{
 };
 
 struct virtio_pci_bridge{
+    struct virtio_pci_hypercall_info hypercall_info;
     __u32 config_req_front;
     __u32 config_req_rear;
     __u32 config_res_front;
@@ -179,7 +201,7 @@ struct hvisor_load_image_args {
 #define HVISOR_HC_SHUTDOWN_ZONE 3
 #define HVISOR_HC_ZONE_LIST 4
 #define HVISOR_HC_CONFIG_CHECK 6
-#define HVISOR_HC_VIRTIO_PCI_DONE 7
+#define HVISOR_HC_VIRTIO_PCI 7
 
 #ifdef X86_64
 
