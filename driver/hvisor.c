@@ -294,6 +294,22 @@ static long hvisor_ioctl(struct file *file, unsigned int ioctl,
     case HVISOR_LOAD_IMAGE:
         err = hvisor_load_image((struct hvisor_load_image_args __user *)arg);
         break;
+    case HVISOR_GET_VIRTIO_PCI_PFN: {
+        __u64 pfn;
+
+        if (virtio_pci_bridge == NULL) {
+            err = -ENODEV;
+            break;
+        }
+
+        pfn = virt_to_phys(virtio_pci_bridge) >> PAGE_SHIFT;
+        if (copy_to_user((__u64 __user *)arg, &pfn, sizeof(pfn)))
+            err = -EFAULT;
+        break;
+    }
+    case HVISOR_VIRTIO_PCI_DOORBELL:
+        err = hvisor_call(HVISOR_HC_VIRTIO_PCI, VIRTIO_PCI_HC_DOORBELL, 0);
+        break;
 #ifdef LOONGARCH64
     case HVISOR_CLEAR_INJECT_IRQ:
         err = hvisor_call(HVISOR_HC_CLEAR_INJECT_IRQ, 0, 0);

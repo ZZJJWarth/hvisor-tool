@@ -82,6 +82,7 @@ struct virtio_bridge {
 };
 
 enum virtio_dev_type{
+    VIRTIO_PCI_BLK=3,
     VIRTIO_PCI_RNG=4,
 };
 
@@ -194,6 +195,8 @@ struct hvisor_load_image_args {
     __u64 load_paddr;
 };
 #define HVISOR_LOAD_IMAGE _IOW(1, 8, struct hvisor_load_image_args)
+#define HVISOR_GET_VIRTIO_PCI_PFN _IOR(1, 9, __u64)
+#define HVISOR_VIRTIO_PCI_DOORBELL _IO(1, 10)
 
 #define HVISOR_HC_INIT_VIRTIO 0
 #define HVISOR_HC_FINISH_REQ 1

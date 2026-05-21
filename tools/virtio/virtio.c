@@ -39,6 +39,7 @@
 #include "virtio_console.h"
 #include "virtio_gpu.h"
 #include "virtio_net.h"
+#include "virtio_pci_userspace.h"
 #include "virtio_rng.h"
 
 /// hvisor kernel module fd
@@ -1013,6 +1014,7 @@ int virtio_handle_req(volatile struct device_req *req) {
 
 void virtio_close() {
     log_warn("virtio devices will be closed");
+    virtio_pci_userspace_backend_shutdown();
     destroy_event_monitor();
     for (int i = 0; i < vdevs_num; i++)
         vdevs[i]->virtio_close(vdevs[i]);
@@ -1312,6 +1314,8 @@ int virtio_init() {
 
     // Initialize event_monitor used by console and net devices
     initialize_event_monitor();
+    if (virtio_pci_userspace_backend_init() != 0)
+        log_warn("failed to enable userspace virtio-pci backend");
     log_info("hvisor init okay!");
     return 0;
 unmap:
