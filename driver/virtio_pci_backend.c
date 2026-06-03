@@ -20,7 +20,10 @@
 #include <linux/string.h>
 
 #include "hvisor.h"
+#include "virtio_pci_blk_backend.h"
 #include "virtio_pci_backend.h"
+
+#include "virtio_pci_blk_backend.c"
 
 struct virtio_pci_bridge *virtio_pci_bridge;
 
@@ -29,11 +32,38 @@ static int virtio_pci_irq_data = -1;
 static struct virtio_pci_dev virtpci_dev_list[MAX_VIRTPCI_DEV];
 static int nxt_dev_idx;
 static bool virtio_pci_test_init_timeout_once;
+static bool virtio_pci_userspace_blk;
+static bool virtio_pci_userspace_rng;
 
 module_param_named(virtio_pci_test_init_timeout_once,
                    virtio_pci_test_init_timeout_once, bool, 0644);
 MODULE_PARM_DESC(virtio_pci_test_init_timeout_once,
                  "Drop one virtio-pci config response to trigger hvisor init timeout");
+module_param_named(virtio_pci_userspace_blk, virtio_pci_userspace_blk, bool,
+                   0644);
+MODULE_PARM_DESC(virtio_pci_userspace_blk,
+                 "Delegate virtio-pci blk backend handling to userspace");
+module_param_named(virtio_pci_userspace_rng, virtio_pci_userspace_rng, bool,
+                   0644);
+MODULE_PARM_DESC(virtio_pci_userspace_rng,
+                 "Delegate virtio-pci rng backend handling to userspace");
+
+static bool virtio_pci_is_userspace_dtype(__u16 dtype)
+{
+    switch (dtype) {
+    case VIRTIO_PCI_BLK:
+        return virtio_pci_userspace_blk;
+    case VIRTIO_PCI_RNG:
+        return virtio_pci_userspace_rng;
+    default:
+        return false;
+    }
+}
+
+static bool virtio_pci_has_userspace_backend(void)
+{
+    return virtio_pci_userspace_blk || virtio_pci_userspace_rng;
+}
 
 static void virtio_pci_write_hypercall_info(__u16 op, __u32 target_cpu,
                                             __u32 request_id, __u32 status) {
@@ -115,7 +145,20 @@ static struct virtio_pci_data_req virtio_pci_pop_data_req(void) {
     return req;
 }
 
+static struct virtio_pci_config_req *virtio_pci_peek_config_req(void) {
+    __u32 front = READ_ONCE(virtio_pci_bridge->config_req_front);
+
+    return &virtio_pci_bridge->config_req_list[front];
+}
+
+static struct virtio_pci_data_req *virtio_pci_peek_data_req(void) {
+    __u32 front = READ_ONCE(virtio_pci_bridge->data_req_front);
+
+    return &virtio_pci_bridge->data_req_list[front];
+}
+
 static int create_virtio_pci_dev(__u16 num_of_vq, struct virtqueue_info *vqs,
+                                 __u16 dtype,
                                  __u64 features,
                                  void (*handler)(struct virtqueue_info *, int q_id)) {
     int i = 0;
@@ -167,6 +210,11 @@ static int create_virtio_pci_dev(__u16 num_of_vq, struct virtqueue_info *vqs,
 
     birth->features = features;
     birth->data_req_handler = handler;
+    if (dtype == VIRTIO_PCI_BLK) {
+        ret = hvisor_virtio_pci_blk_init_dev(nxt_dev_idx);
+        if (ret)
+            goto err_unmap;
+    }
     return nxt_dev_idx++;
 
 err_unmap:
@@ -237,6 +285,11 @@ static irqreturn_t virtio_pci_irq_config_thread_handler(int irq, void *dev_id) {
     }
 
     while (!virtio_pci_config_req_empty()) {
+        struct virtio_pci_config_req *peek_req = virtio_pci_peek_config_req();
+
+        if (virtio_pci_is_userspace_dtype(peek_req->info.dtype))
+            break;
+
         __u32 status = 0;
         __u16 dev_idx = 0;
         void (*handler)(struct virtqueue_info *, int) = NULL;
@@ -252,6 +305,9 @@ static irqreturn_t virtio_pci_irq_config_thread_handler(int irq, void *dev_id) {
         }
 
         switch (info->dtype) {
+        case VIRTIO_PCI_BLK:
+            handler = NULL;
+            break;
         case VIRTIO_PCI_RNG:
             handler = virtio_rng_handler;
             break;
@@ -260,9 +316,16 @@ static irqreturn_t virtio_pci_irq_config_thread_handler(int irq, void *dev_id) {
             break;
         }
 
-        if (handler != NULL) {
+        if (info->dtype == VIRTIO_PCI_BLK) {
             ret = create_virtio_pci_dev(info->num_of_queues, info->vqs,
-                                        info->features, handler);
+                                        info->dtype, info->features, handler);
+            if (ret < 0)
+                status = -ret;
+            else
+                dev_idx = (__u16)ret;
+        } else if (handler != NULL) {
+            ret = create_virtio_pci_dev(info->num_of_queues, info->vqs,
+                                        info->dtype, info->features, handler);
             if (ret < 0)
                 status = -ret;
             else
@@ -285,6 +348,12 @@ static irqreturn_t virtio_pci_irq_data_thread_handler(int irq, void *dev_id) {
     }
 
     while (!virtio_pci_data_req_empty()) {
+        struct virtio_pci_data_req *peek_req = virtio_pci_peek_data_req();
+
+        if (virtio_pci_has_userspace_backend() &&
+            peek_req->info.dev_id >= (MAX_VIRTPCI_DEV / 2))
+            break;
+
         struct virtio_pci_data_req req = virtio_pci_pop_data_req();
         struct virtio_pci_data_info *info = &req.info;
         __u64 dev_idx = info->dev_id;
@@ -307,6 +376,8 @@ static irqreturn_t virtio_pci_irq_data_thread_handler(int irq, void *dev_id) {
 
         if (dev->data_req_handler != NULL)
             dev->data_req_handler(vq, queue_id);
+        else
+            hvisor_virtio_pci_blk_handler(info->dev_id, vq, queue_id);
         virtio_pci_write_hypercall_info(VIRTIO_PCI_HC_OP_DATA_REQ_COMPLETE,
                                         cpu_id, req.request_id, 0);
         hvisor_call(HVISOR_HC_VIRTIO_PCI, VIRTIO_PCI_HC_DOORBELL, 0);
@@ -389,6 +460,7 @@ err_out:
 
 void hvisor_virtio_pci_exit(void) {
 #ifndef X86_64
+    hvisor_virtio_pci_blk_exit();
     if (virtio_pci_irq_config != -1)
         free_irq(virtio_pci_irq_config, NULL);
     if (virtio_pci_irq_data != -1)
