@@ -315,26 +315,29 @@ static bool handle_userspace_pci_data(void) {
         struct virtio_pci_data_req req;
         UserspacePciDev *dev;
         int ret;
+        __u32 status = 0;
 
         memcpy(&req, (const void *)&virtio_pci_bridge->data_req_list[front],
                sizeof(req));
         if (req.info.dev_id < USERSPACE_VIRTPCI_DEV_BASE) {
-            log_error(
-                "userspace pci backend: invalid dev_id %u below userspace base",
+            log_debug(
+                "userspace pci backend: dev_id %u belongs to kernel backend",
                 req.info.dev_id);
             break;
         }
         if (req.info.dev_id >= MAX_VIRTPCI_DEV) {
             log_error("userspace pci backend: invalid dev_id %u out of range",
                       req.info.dev_id);
-            break;
+            status = EINVAL;
+            goto complete;
         }
         dev = &userspace_pci_devs[req.info.dev_id];
         if (!dev->active || req.info.queue_id >= dev->num_of_vq) {
             log_error(
                 "userspace pci backend: inactive dev %u or invalid queue %u/%u",
                 req.info.dev_id, req.info.queue_id, dev->num_of_vq);
-            break;
+            status = EINVAL;
+            goto complete;
         }
 
         switch (dev->dtype) {
@@ -352,14 +355,15 @@ static bool handle_userspace_pci_data(void) {
             log_error(
                 "userspace pci backend: failed to process dev %u type %u queue %u, ret=%d",
                 req.info.dev_id, dev->dtype, req.info.queue_id, ret);
-            break;
+            status = (__u32)(-ret);
         }
 
+complete:
         __atomic_store_n(&virtio_pci_bridge->data_req_front,
                          (front + 1) & (MAX_PCI_DATA_REQ - 1),
                          memory_order_release);
         virtio_pci_userspace_notify(VIRTIO_PCI_HC_OP_DATA_REQ_COMPLETE,
-                                    req.info.cpu_id, req.request_id, 0);
+                                    req.info.cpu_id, req.request_id, status);
         did_work = true;
         front = __atomic_load_n(&virtio_pci_bridge->data_req_front,
                                 memory_order_acquire);

@@ -639,7 +639,8 @@ static const char *virtio_mmio_reg_name(uint64_t offset) {
 
 uint64_t virtio_mmio_read(VirtIODevice *vdev, uint64_t offset, unsigned size) {
     log_debug("READ virtio mmio at offset=%#x[%s], size=%d, vdev=%p, type=%d",
-              offset, virtio_mmio_reg_name(offset), size, vdev, vdev->type);
+              offset, virtio_mmio_reg_name(offset), size, vdev,
+              vdev ? vdev->type : VirtioTNone);
 
     if (!vdev) {
         switch (offset) {
@@ -984,7 +985,7 @@ int virtio_handle_req(volatile struct device_req *req) {
     if (i == vdevs_num) {
         log_warn("no matched virtio dev in zone %d, address is 0x%x",
                  req->src_zone, req->address);
-        value = virtio_mmio_read(NULL, 0, 0);
+        value = virtio_mmio_read(NULL, req->address, req->size);
         virtio_finish_cfg_req(req->src_cpu, value);
         return -1;
     }

@@ -18,6 +18,7 @@
 #include <linux/random.h>
 #include <linux/slab.h>
 #include <linux/string.h>
+#include <linux/virtio_ring.h>
 
 #include "hvisor.h"
 #include "virtio_pci_blk_backend.h"
@@ -218,6 +219,8 @@ static int create_virtio_pci_dev(__u16 num_of_vq, struct virtqueue_info *vqs,
     return nxt_dev_idx++;
 
 err_unmap:
+    if (i >= num_of_vq)
+        i = num_of_vq - 1;
     while (i >= 0) {
         if (birth->vqs[i].desc_area)
             memunmap((void *)(uintptr_t)birth->vqs[i].desc_area);
@@ -239,6 +242,8 @@ static void virtio_rng_handler(struct virtqueue_info *vq, int queue_id) {
     struct virtq_desc *desc = (struct virtq_desc *)(uintptr_t)vq->desc_area;
     struct virtq_avail *avail = (struct virtq_avail *)(uintptr_t)vq->avail_area;
     struct virtq_used *used = (struct virtq_used *)(uintptr_t)vq->used_area;
+    __u16 used_idx;
+    __u16 avail_idx;
 
     if (desc == NULL || avail == NULL || used == NULL) {
         pr_err("desc:%p avail:%p used:%p\n", desc, avail, used);
@@ -249,28 +254,70 @@ static void virtio_rng_handler(struct virtqueue_info *vq, int queue_id) {
         return;
     }
 
-    {
-        int i = used->idx;
+    used_idx = READ_ONCE(used->idx);
+    smp_rmb();
+    avail_idx = READ_ONCE(avail->idx);
 
-        while (i < avail->idx) {
-            int j = i % queue_size;
-            int avail_ring_content = avail->ring[j];
-            struct virtq_desc desc_item = desc[avail_ring_content];
-            struct virtq_used_elem uitem;
-            void *buffer = memremap(desc_item.addr, desc_item.len, MEMREMAP_WB);
+    while (used_idx != avail_idx) {
+        __u16 slot = used_idx % queue_size;
+        __u16 head = READ_ONCE(avail->ring[slot]);
+        __u16 idx = head;
+        __u16 seen = 0;
+        __u32 total_len = 0;
 
-            if (buffer == NULL) {
-                pr_err("mem err in RNG!");
-            } else {
-                get_random_bytes(buffer, desc_item.len);
-                memunmap(buffer);
-            }
-            uitem.id = avail_ring_content;
-            uitem.len = desc_item.len;
-            used->ring[j] = uitem;
-            i++;
+        if (head >= queue_size) {
+            pr_err("virtio rng invalid desc head %u, queue size %u\n", head,
+                   queue_size);
+            goto complete;
         }
-        used->idx = i;
+
+        for (;;) {
+            struct virtq_desc desc_item;
+            void *buffer;
+
+            if (seen++ >= queue_size || idx >= queue_size) {
+                pr_err("virtio rng invalid descriptor chain\n");
+                total_len = 0;
+                break;
+            }
+
+            desc_item = desc[idx];
+            if (desc_item.flags & VRING_DESC_F_INDIRECT) {
+                pr_err("virtio rng indirect descriptors are unsupported\n");
+                total_len = 0;
+                break;
+            }
+            if ((desc_item.flags & VRING_DESC_F_WRITE) == 0) {
+                pr_err("virtio rng descriptor %u is not writable\n", idx);
+                total_len = 0;
+                break;
+            }
+
+            buffer = memremap(desc_item.addr, desc_item.len, MEMREMAP_WB);
+            if (buffer == NULL) {
+                pr_err("virtio rng failed to map desc %u addr=%llx len=%u\n",
+                       idx, desc_item.addr, desc_item.len);
+                total_len = 0;
+                break;
+            }
+
+            get_random_bytes(buffer, desc_item.len);
+            memunmap(buffer);
+            total_len += desc_item.len;
+
+            if ((desc_item.flags & VRING_DESC_F_NEXT) == 0)
+                break;
+            idx = desc_item.next;
+        }
+
+complete:
+        used->ring[slot].id = head;
+        used->ring[slot].len = total_len;
+        smp_wmb();
+        used_idx++;
+        WRITE_ONCE(used->idx, used_idx);
+        smp_mb();
+        avail_idx = READ_ONCE(avail->idx);
     }
 }
 

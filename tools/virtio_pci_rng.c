@@ -29,6 +29,7 @@ void userspace_pci_rng_cleanup_dev(UserspacePciDev *dev) { (void)dev; }
 
 int userspace_pci_rng_process_vq(UserspacePciVirtQueue *vq) {
     __u16 used_idx;
+    __u16 avail_idx;
 
     if (vq == NULL || vq->desc == NULL || vq->avail == NULL || vq->used == NULL)
         return -EINVAL;
@@ -36,7 +37,9 @@ int userspace_pci_rng_process_vq(UserspacePciVirtQueue *vq) {
         return -EINVAL;
 
     used_idx = vq->used->idx;
-    while (used_idx != vq->avail->idx) {
+    __sync_synchronize();
+    avail_idx = vq->avail->idx;
+    while (used_idx != avail_idx) {
         __u16 slot = used_idx % vq->queue_size;
         __u16 head = vq->avail->ring[slot];
         __u16 idx = head;
@@ -44,24 +47,26 @@ int userspace_pci_rng_process_vq(UserspacePciVirtQueue *vq) {
         __u16 seen = 0;
 
         if (head >= vq->queue_size)
-            return -EIO;
+            goto complete;
 
         for (;;) {
             volatile struct virtq_desc *desc;
             void *buf;
 
             if (seen++ >= vq->queue_size)
-                return -EIO;
+                goto complete;
             if (idx >= vq->queue_size)
-                return -EIO;
+                goto complete;
 
             desc = &vq->desc[idx];
+            if (desc->flags & VRING_DESC_F_INDIRECT)
+                goto complete;
             if ((desc->flags & VRING_DESC_F_WRITE) == 0)
-                return -EINVAL;
+                goto complete;
             if (userspace_pci_translate_addr(desc->addr, desc->len, &buf) != 0)
-                return -EIO;
+                goto complete;
             if (fill_random(buf, desc->len) != 0) {
-                return -EIO;
+                goto complete;
             }
             total_len += desc->len;
 
@@ -70,11 +75,14 @@ int userspace_pci_rng_process_vq(UserspacePciVirtQueue *vq) {
             idx = desc->next;
         }
 
+complete:
         vq->used->ring[slot].id = head;
         vq->used->ring[slot].len = total_len;
         __sync_synchronize();
         used_idx++;
         vq->used->idx = used_idx;
+        __sync_synchronize();
+        avail_idx = vq->avail->idx;
     }
 
     return 0;
