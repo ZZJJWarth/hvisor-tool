@@ -32,7 +32,7 @@ $(error "Unsupported architecture $(ARCH)")
 	endif
 endif
 
-CFLAGS := -Wall -Wextra -DLOG_USE_COLOR -DHLOG=$(LOG) -pthread
+CFLAGS := -Wall -Wextra -DHLOG=$(LOG) -pthread
 
 # Conditionally add sysroot if ROOT is set
 # Otherwise use default flags from cross-compiler
